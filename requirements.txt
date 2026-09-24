@@ -1,0 +1,5 @@
+numpy>=1.26
+opencv-python-headless>=4.8
+PySide6>=6.6
+# Malvar 才需要。发行包默认不打进去。开发机可选：
+# colour-demosaicing>=0.2
