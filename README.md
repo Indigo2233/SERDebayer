@@ -1,6 +1,6 @@
 # SERDebayer
 
-把行星 / 月亮的 Bayer SER 转成真彩 RGB SER，给 [AutoStakkert!4](https://www.autostakkert.com/) 叠加。
+把行星 / 月亮的 Bayer SER 转成真彩 RGB SER，给 [AutoStakkert!4](https://www.autostakkert.com/) 叠加。头信息写成 MONO 的单通道文件同样会 Debayer，阵列在界面里选（默认 RGGB）。
 
 AS!4 默认双线性 Debayer 在高饱和时容易出彩色网格。本工具在叠加前用更好的 demosaic 写出 24/48bit RGB SER；进 AS!4 后选 Auto Detect，**不要再 Force Debayer**。
 

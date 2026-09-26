@@ -56,6 +56,7 @@ OpenCV VNG 和 dcraw -q 1、Fitswork 相机 RAW 转色是同一族算法。
 
 输出是 SER v3 ColorID=100 的 RGB 视频，可直接丢给 AutoStakkert!4。
 进 AS!4 后 Color 选 Auto Detect，不要再 Force Debayer。
+头信息写成 MONO 的单通道 SER 也会 Debayer，阵列自己选（默认 RGGB）。
 
 分发：运行 build.bat，把 dist\\SERDebayer 整个文件夹打成 zip 即可。
 对方不需要安装 Python。
@@ -329,10 +330,17 @@ class MainWindow(QMainWindow):
         self.out_edit.setText(default_output_path(path, int(self.depth.currentData())))
         if h.bayer_pattern:
             self.pattern.setCurrentText("自动")
+        elif h.can_debayer:
+            self.pattern.setCurrentText("RGGB")
         if h.is_rgb:
             self.log.appendPlainText("这个文件已经是 RGB/BGR SER，不需要转色。")
-        else:
+        elif h.bayer_pattern:
             self.log.appendPlainText(f"已打开 {os.path.basename(path)}  Bayer={h.bayer_pattern}")
+        else:
+            self.log.appendPlainText(
+                f"已打开 {os.path.basename(path)}  头信息是 {h.color_name}，"
+                "仍按 Bayer 转色。阵列请自己核对（默认 RGGB）。"
+            )
 
     def current_pattern(self) -> str:
         text = self.pattern.currentText()
@@ -396,8 +404,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "无法读取", str(exc))
             return
-        if not header.is_bayer:
-            QMessageBox.warning(self, "不是 Bayer", f"当前是 {header.color_name}，不用转色。")
+        if header.is_rgb:
+            QMessageBox.warning(self, "已经是 RGB", f"当前是 {header.color_name}，不用转色。")
+            return
+        if not header.can_debayer:
+            QMessageBox.warning(self, "无法转色", f"当前是 {header.color_name}，不是单通道 SER。")
             return
         start = self.frame0.value()
         end = self.frame1.value()

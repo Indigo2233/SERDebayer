@@ -66,6 +66,11 @@ class SerHeader:
         return self.color_id in (100, 101)
 
     @property
+    def can_debayer(self) -> bool:
+        """单通道就能按 Bayer 解。很多采集软件把 CFA 标成 MONO。"""
+        return self.planes == 1
+
+    @property
     def planes(self) -> int:
         return 3 if self.is_rgb else 1
 

@@ -149,8 +149,10 @@ def convert_ser(
     should_cancel: Callable[[], bool] | None = None,
 ) -> None:
     header = read_header(src_path)
-    if not header.is_bayer:
-        raise ValueError(f"输入不是 Bayer SER（当前 {header.color_name}）")
+    if header.is_rgb:
+        raise ValueError(f"输入已经是 RGB SER（当前 {header.color_name}）")
+    if not header.can_debayer:
+        raise ValueError(f"输入不是单通道 SER，无法 Debayer（当前 {header.color_name}）")
     if start < 0 or count < 1 or start + count > header.frames:
         raise ValueError("帧范围无效")
 
