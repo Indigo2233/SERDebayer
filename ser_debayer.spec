@@ -10,7 +10,9 @@ a = Analysis(
     hiddenimports=[
         "gui",
         "convert",
+        "cli",
         "engines",
+        "input_io",
         "ser_io",
         "menon_fast",
         "multiprocessing",
@@ -18,6 +20,7 @@ a = Analysis(
         "multiprocessing.freeze_support",
         "cv2",
         "numpy",
+        "astropy.io.fits",
         "PySide6.QtCore",
         "PySide6.QtGui",
         "PySide6.QtWidgets",
@@ -46,7 +49,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
-exe = EXE(
+gui_exe = EXE(
     pyz,
     a.scripts,
     [],
@@ -64,8 +67,27 @@ exe = EXE(
     entitlements_file=None,
 )
 
+cli_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="SERDebayerCLI",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
 coll = COLLECT(
-    exe,
+    gui_exe,
+    cli_exe,
     a.binaries,
     a.datas,
     strip=False,

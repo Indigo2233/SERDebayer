@@ -58,6 +58,10 @@ class SerHeader:
         return COLOR_NAMES.get(self.color_id, f"UNKNOWN({self.color_id})")
 
     @property
+    def format_name(self) -> str:
+        return "SER"
+
+    @property
     def is_bayer(self) -> bool:
         return self.color_id in BAYER_PATTERNS
 

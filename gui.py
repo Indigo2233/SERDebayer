@@ -1,4 +1,4 @@
-"""SER 真彩转色：GUI 只负责选文件/预览/调度，算法全部来自现成库。"""
+"""Bayer SER/AVI/FITS 真彩转色 GUI。"""
 
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from convert import convert_ser, default_output_path, estimate_output_bytes, recommended_workers
-from engines import ALGORITHMS, ALG_BY_KEY, apply_wb, demosaic_frame, estimate_wb_gains
-from ser_io import detect_pixel_dtype, read_frame, read_header
+from convert import convert_input, default_output_path, estimate_output_bytes, frame_to_rgb, recommended_workers
+from engines import ALGORITHMS, ALG_BY_KEY, apply_wb, estimate_wb_gains
+from input_io import SUPPORTED_INPUT_SUFFIXES, input_format_name, open_input, read_input_header
 
-HELP = """这个软件不自己实现转色算法，只做 SER 读写和调度：
+HELP = """这个软件使用现成算法完成 Bayer 转色，并负责 SER/AVI/FITS 读取与 RGB SER 写出：
 
 • DDFAPD / Menon 2007
   OpenCV float32 卷积（menon_fast）
@@ -54,6 +54,8 @@ OpenCV VNG 和 dcraw -q 1、Fitswork 相机 RAW 转色是同一族算法。
 本机 Siril 1.4 的 CLI convert 只转换 FITS/TIFF/视频，不会去转现成的 Bayer SER，
 所以没有做成一键调用。要 RCD 请直接在 Siril 里打开该 SER。
 
+输入支持 Bayer/MONO SER、8-bit 灰度 Bayer AVI、8/16-bit FITS。
+三通道 RGB FITS 会直接转换为 RGB SER。
 输出是 SER v3 ColorID=100 的 RGB 视频，可直接丢给 AutoStakkert!4。
 进 AS!4 后 Color 选 Auto Detect，不要再 Force Debayer。
 头信息写成 MONO 的单通道 SER 也会 Debayer，阵列自己选（默认 RGGB）。
@@ -101,7 +103,7 @@ class Worker(QThread):
 
     def run(self) -> None:
         try:
-            convert_ser(
+            convert_input(
                 **self.kwargs,
                 progress=lambda i, n, msg: self.progress.emit(i, n, msg),
                 should_cancel=lambda: self._cancel,
@@ -129,13 +131,10 @@ class PreviewWorker(QThread):
 
     def run(self) -> None:
         try:
-            header = read_header(self.path)
-            with open(self.path, "rb") as f:
-                f.seek(178)
-                probe = f.read(header.frame_size)
-                dtype = detect_pixel_dtype(header, probe)
-                cfa = read_frame(f, header, self.index, dtype)
-            rgb = demosaic_frame(cfa, self.pattern, self.algo, self.depth)
+            header = read_input_header(self.path)
+            with open_input(self.path) as source:
+                frame = source.read_frame(self.index)
+            rgb = frame_to_rgb(frame, header.is_rgb, self.pattern, self.algo, self.depth)
             if self.white_balance:
                 rgb = apply_wb(rgb, estimate_wb_gains(rgb))
             note = f"第 {self.index} 帧  {rgb.shape[1]}x{rgb.shape[0]}  {rgb.dtype}"
@@ -169,7 +168,7 @@ class MainWindow(QMainWindow):
         fl = QFormLayout(files)
         self.in_edit = QLineEdit()
         self.out_edit = QLineEdit()
-        btn_in = QPushButton("打开 SER…")
+        btn_in = QPushButton("打开输入…")
         btn_out = QPushButton("另存为…")
         btn_in.clicked.connect(self.pick_input)
         btn_out.clicked.connect(self.pick_output)
@@ -285,7 +284,7 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path.lower().endswith(".ser"):
+            if os.path.splitext(path)[1].lower() in SUPPORTED_INPUT_SUFFIXES:
                 self.in_edit.setText(path)
                 self.load_input(path)
                 break
@@ -293,7 +292,7 @@ class MainWindow(QMainWindow):
     def _algo_changed(self) -> None:
         algo = ALG_BY_KEY[self.algo.currentData()]
         extra = ""
-        if algo.max_output_depth == 8:
+        if algo.max_output_depth == 8 and not (self.header and self.header.is_rgb):
             self.depth.setCurrentIndex(1)
             extra += "  该算法只能出 8bit。"
         self.workers.setValue(recommended_workers(algo.key))
@@ -301,7 +300,12 @@ class MainWindow(QMainWindow):
         self.algo_note.setText(algo.note + extra)
 
     def pick_input(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "打开 Bayer SER", "", "SER (*.ser)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开 Bayer 图像/视频",
+            "",
+            "支持的输入 (*.ser *.avi *.fit *.fits *.fts);;SER (*.ser);;AVI (*.avi);;FITS (*.fit *.fits *.fts)",
+        )
         if path:
             self.in_edit.setText(path)
             self.load_input(path)
@@ -313,14 +317,14 @@ class MainWindow(QMainWindow):
 
     def load_input(self, path: str) -> None:
         try:
-            self.header = read_header(path)
+            self.header = read_input_header(path)
         except Exception as exc:
             QMessageBox.critical(self, "无法读取", str(exc))
             return
         h = self.header
         gb = h.file_size / 1024**3
         self.meta.setText(
-            f"{h.width}×{h.height}  {h.frames} 帧  {h.depth}bit  {h.color_name}\n"
+            f"{input_format_name(h)}  {h.width}×{h.height}  {h.frames} 帧  {h.depth}bit  {h.color_name}\n"
             f"{h.instrument or '(无相机名)'}  {gb:.2f} GB"
         )
         self.frame0.setMaximum(max(0, h.frames - 1))
@@ -332,8 +336,11 @@ class MainWindow(QMainWindow):
             self.pattern.setCurrentText("自动")
         elif h.can_debayer:
             self.pattern.setCurrentText("RGGB")
-        if h.is_rgb:
-            self.log.appendPlainText("这个文件已经是 RGB/BGR SER，不需要转色。")
+        if h.is_rgb and input_format_name(h) == "SER":
+            self.log.appendPlainText("这个文件已经是 RGB/BGR SER。")
+        elif h.is_rgb:
+            self.wb_check.setChecked(False)
+            self.log.appendPlainText(f"已打开 {os.path.basename(path)}  RGB FITS，将直接写入 RGB SER。")
         elif h.bayer_pattern:
             self.log.appendPlainText(f"已打开 {os.path.basename(path)}  Bayer={h.bayer_pattern}")
         else:
@@ -400,15 +407,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺少路径", "请先选择输入和输出 SER。")
             return
         try:
-            header = read_header(path)
+            header = read_input_header(path)
         except Exception as exc:
             QMessageBox.critical(self, "无法读取", str(exc))
             return
-        if header.is_rgb:
+        if header.is_rgb and input_format_name(header) == "SER":
             QMessageBox.warning(self, "已经是 RGB", f"当前是 {header.color_name}，不用转色。")
             return
-        if not header.can_debayer:
-            QMessageBox.warning(self, "无法转色", f"当前是 {header.color_name}，不是单通道 SER。")
+        if not header.is_rgb and not header.can_debayer:
+            QMessageBox.warning(self, "无法转色", f"当前是 {header.color_name}，不是单通道 Bayer 数据。")
             return
         start = self.frame0.value()
         end = self.frame1.value()
@@ -418,7 +425,7 @@ class MainWindow(QMainWindow):
         count = end - start + 1
         depth = int(self.depth.currentData())
         algo = ALG_BY_KEY[self.algo.currentData()]
-        if algo.max_output_depth < depth:
+        if not header.is_rgb and algo.max_output_depth < depth:
             depth = algo.max_output_depth
             self.depth.setCurrentIndex(1)
         est = estimate_output_bytes(header, count, depth)
@@ -427,7 +434,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "磁盘空间不足", f"预计输出 {est/1024**3:.2f} GB，剩余 {disk/1024**3:.2f} GB")
             return
         self.log.appendPlainText(
-            f"开始: {algo.label}  {self.current_pattern()}  {depth}bit  帧 {start}-{end}  约 {est/1024**3:.2f} GB"
+            f"开始: {'RGB 直通' if header.is_rgb else algo.label}  {self.current_pattern()}  "
+            f"{depth}bit  帧 {start}-{end}  约 {est/1024**3:.2f} GB"
         )
         self.bar.setValue(0)
         self.bar.setMaximum(count)
@@ -490,7 +498,7 @@ def main() -> None:
     app.setStyle("Fusion")
     win = MainWindow()
     win.show()
-    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".ser"):
+    if len(sys.argv) > 1 and os.path.splitext(sys.argv[1])[1].lower() in SUPPORTED_INPUT_SUFFIXES:
         win.in_edit.setText(sys.argv[1])
         win.load_input(sys.argv[1])
     sys.exit(app.exec())

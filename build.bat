@@ -21,6 +21,7 @@ if errorlevel 1 (
 echo.
 echo Done. Zip this folder and send it:
 echo   %~dp0dist\SERDebayer
-echo Recipients run SERDebayer.exe  (no Python needed)
+echo GUI:  SERDebayer.exe
+echo CLI:  SERDebayerCLI.exe info/convert ...
 echo Do not ship only the exe; keep the whole folder.
 pause

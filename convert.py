@@ -1,4 +1,4 @@
-"""整段 SER → RGB SER。逐帧调用 OpenCV / colour-demosaicing。"""
+"""SER、灰度 Bayer AVI、FITS → RGB SER。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,12 @@ from pathlib import Path
 import numpy as np
 
 from engines import ALG_BY_KEY, apply_wb, demosaic_frame, estimate_wb_gains
+from input_io import (
+    Header,
+    input_format_name,
+    open_input,
+    read_input_header,
+)
 from ser_io import (
     HEADER_SIZE,
     SerHeader,
@@ -130,12 +136,88 @@ def process_index(pair: tuple[int, int]) -> None:
     w["out_mm"][start : start + len(blob)] = blob
 
 
-def estimate_output_bytes(header: SerHeader, count: int, depth: int) -> int:
+def estimate_output_bytes(header: Header, count: int, depth: int) -> int:
     bpp = 3 if depth <= 8 else 6
     return HEADER_SIZE + count * header.width * header.height * bpp + count * 8
 
 
-def convert_ser(
+def frame_to_rgb(
+    frame: np.ndarray,
+    is_rgb: bool,
+    pattern: str,
+    algo_key: str,
+    output_depth: int,
+) -> np.ndarray:
+    """把一个输入帧规范化为指定输出位深的 RGB。"""
+    if not is_rgb:
+        return demosaic_frame(frame, pattern, algo_key, output_depth)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"RGB 输入帧形状无效: {frame.shape}")
+    if output_depth <= 8:
+        if frame.dtype == np.uint8:
+            return np.ascontiguousarray(frame)
+        if frame.dtype == np.uint16:
+            return (frame >> 8).astype(np.uint8)
+    else:
+        if frame.dtype == np.uint16:
+            return np.ascontiguousarray(frame)
+        if frame.dtype == np.uint8:
+            return frame.astype(np.uint16) << 8
+    raise TypeError(f"不支持的像素类型: {frame.dtype}")
+
+
+def _convert_generic(
+    src_path: str,
+    dst_path: str,
+    header: Header,
+    pattern: str,
+    algo_key: str,
+    output_depth: int,
+    start: int,
+    count: int,
+    white_balance: bool,
+    progress: Callable[[int, int, str], None] | None,
+    should_cancel: Callable[[], bool] | None,
+) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(dst_path)) or ".", exist_ok=True)
+    tmp_path = dst_path + ".partial"
+    wb = (1.0, 1.0, 1.0)
+    if white_balance:
+        with open_input(src_path) as source:
+            sample = source.read_frame(start)
+        sample_rgb = frame_to_rgb(sample, header.is_rgb, pattern, algo_key, output_depth)
+        wb = estimate_wb_gains(sample_rgb)
+        if progress:
+            progress(0, count, f"白平衡增益 R={wb[0]:.3f} G={wb[1]:.3f} B={wb[2]:.3f}（全片同一系数）")
+    if progress:
+        progress(0, count, f"{input_format_name(header)} 按帧读取，输出 RGB SER")
+    try:
+        with open_input(src_path) as source, open(tmp_path, "wb") as out:
+            write_rgb_header(out, header, count, output_depth)
+            for out_index, src_index in enumerate(range(start, start + count), start=1):
+                if should_cancel and should_cancel():
+                    raise InterruptedError("已取消")
+                frame = source.read_frame(src_index)
+                rgb = frame_to_rgb(frame, header.is_rgb, pattern, algo_key, output_depth)
+                rgb = apply_wb(rgb, wb)
+                if rgb.dtype == np.uint16:
+                    rgb = rgb.astype("<u2", copy=False)
+                out.write(np.ascontiguousarray(rgb).tobytes())
+                if progress:
+                    progress(out_index, count, f"已转 {out_index}/{count}")
+        os.replace(tmp_path, dst_path)
+        if progress:
+            progress(count, count, f"完成: {dst_path}")
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
+def convert_input(
     src_path: str,
     dst_path: str,
     pattern: str,
@@ -148,13 +230,35 @@ def convert_ser(
     progress: Callable[[int, int, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> None:
-    header = read_header(src_path)
-    if header.is_rgb:
+    header = read_input_header(src_path)
+    fmt = input_format_name(header)
+    if output_depth not in (8, 16):
+        raise ValueError(f"输出位深必须是 8 或 16，当前为 {output_depth}")
+    if algo_key not in ALG_BY_KEY:
+        raise ValueError(f"未知算法: {algo_key}")
+    if not header.is_rgb and output_depth > ALG_BY_KEY[algo_key].max_output_depth:
+        raise ValueError(f"{ALG_BY_KEY[algo_key].label} 最高支持 {ALG_BY_KEY[algo_key].max_output_depth}bit 输出")
+    if header.is_rgb and fmt == "SER":
         raise ValueError(f"输入已经是 RGB SER（当前 {header.color_name}）")
-    if not header.can_debayer:
-        raise ValueError(f"输入不是单通道 SER，无法 Debayer（当前 {header.color_name}）")
+    if not header.is_rgb and not header.can_debayer:
+        raise ValueError(f"输入不是单通道 Bayer 数据，无法 Debayer（当前 {header.color_name}）")
     if start < 0 or count < 1 or start + count > header.frames:
         raise ValueError("帧范围无效")
+
+    if fmt != "SER":
+        return _convert_generic(
+            src_path,
+            dst_path,
+            header,
+            pattern,
+            algo_key,
+            output_depth,
+            start,
+            count,
+            white_balance,
+            progress,
+            should_cancel,
+        )
 
     with open(src_path, "rb") as f:
         f.seek(HEADER_SIZE)
@@ -239,6 +343,10 @@ def convert_ser(
             except OSError:
                 pass
         raise
+
+
+# 保留旧 API，方便已有调用方继续使用。
+convert_ser = convert_input
 
 
 def default_output_path(src_path: str, depth: int) -> str:
